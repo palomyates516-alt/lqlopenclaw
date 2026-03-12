@@ -141,6 +141,36 @@ export type LaunchctlPrintInfo = {
   lastExitReason?: string;
 };
 
+/**
+ * Wait for a process to exit by polling its existence.
+ * Returns immediately if pid is undefined, 0, or process is already gone.
+ */
+async function waitForPidExit(pid?: number): Promise<void> {
+  if (typeof pid !== "number" || pid <= 1) {
+    return;
+  }
+  const maxWaitMs = 30_000; // 30 seconds timeout
+  const checkIntervalMs = 100;
+  const start = Date.now();
+
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      // process.kill(pid, 0) checks if process exists without sending signal
+      process.kill(pid, 0);
+      // Process still exists, wait and retry
+      await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
+    } catch (err: unknown) {
+      // ESRCH = no such process, which means it exited
+      if ((err as NodeJS.ErrnoException).code === "ESRCH") {
+        return;
+      }
+      // Other error (e.g., EPERM), exit to avoid infinite loop
+      return;
+    }
+  }
+  // Timeout - proceed anyway (launchd may have cleaned it up)
+}
+
 export function parseLaunchctlPrint(output: string): LaunchctlPrintInfo {
   const entries = parseKeyValueOutput(output, "=");
   const info: LaunchctlPrintInfo = {};
@@ -411,8 +441,16 @@ export async function installLaunchAgent({
   await fs.writeFile(plistPath, plist, { encoding: "utf8", mode: LAUNCH_AGENT_PLIST_MODE });
   await fs.chmod(plistPath, LAUNCH_AGENT_PLIST_MODE).catch(() => undefined);
 
+  // Get current PID before stopping the service
+  const currentRuntime = await readLaunchAgentRuntime(env);
+
   await execLaunchctl(["bootout", domain, plistPath]);
   await execLaunchctl(["unload", plistPath]);
+  // Wait for the old process to exit before starting a new one.
+  // launchctl bootout/unload return immediately without waiting for process exit,
+  // which can cause race conditions where the new process attempts to bind port 18789
+  // before the old process has released it.
+  await waitForPidExit(currentRuntime.pid);
   // launchd can persist "disabled" state even after bootout + plist removal; clear it before bootstrap.
   await execLaunchctl(["enable", `${domain}/${label}`]);
   const boot = await execLaunchctl(["bootstrap", domain, plistPath]);
