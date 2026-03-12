@@ -143,11 +143,12 @@ export type LaunchctlPrintInfo = {
 
 /**
  * Wait for a process to exit by polling its existence.
+ * Returns true if the process exited, false if timed out.
  * Returns immediately if pid is undefined, 0, or process is already gone.
  */
-async function waitForPidExit(pid?: number): Promise<void> {
+async function waitForPidExit(pid?: number): Promise<boolean> {
   if (typeof pid !== "number" || pid <= 1) {
-    return;
+    return true;
   }
   const maxWaitMs = 30_000; // 30 seconds timeout
   const checkIntervalMs = 100;
@@ -160,15 +161,23 @@ async function waitForPidExit(pid?: number): Promise<void> {
       // Process still exists, wait and retry
       await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
     } catch (err: unknown) {
+      const errorCode = (err as NodeJS.ErrnoException).code;
       // ESRCH = no such process, which means it exited
-      if ((err as NodeJS.ErrnoException).code === "ESRCH") {
-        return;
+      if (errorCode === "ESRCH") {
+        return true;
       }
-      // Other error (e.g., EPERM), exit to avoid infinite loop
-      return;
+      // EPERM = process exists but we lack permission to signal it.
+      // Keep polling; the timeout will handle bail-out.
+      if (errorCode === "EPERM") {
+        await new Promise((resolve) => setTimeout(resolve, checkIntervalMs));
+        continue;
+      }
+      // Unexpected error - bail out to avoid infinite loop
+      return true;
     }
   }
-  // Timeout - proceed anyway (launchd may have cleaned it up)
+  // Timeout - signal to caller that we didn't confirm exit
+  return false;
 }
 
 export function parseLaunchctlPrint(output: string): LaunchctlPrintInfo {
@@ -428,6 +437,9 @@ export async function installLaunchAgent({
   await ensureSecureDirectory(libraryDir);
   await ensureSecureDirectory(path.dirname(plistPath));
 
+  // Get current PID before any modifications to avoid capturing a restarted process
+  const currentRuntime = await readLaunchAgentRuntime(env);
+
   const serviceDescription = resolveGatewayServiceDescription({ env, environment, description });
   const plist = buildLaunchAgentPlist({
     label,
@@ -441,16 +453,18 @@ export async function installLaunchAgent({
   await fs.writeFile(plistPath, plist, { encoding: "utf8", mode: LAUNCH_AGENT_PLIST_MODE });
   await fs.chmod(plistPath, LAUNCH_AGENT_PLIST_MODE).catch(() => undefined);
 
-  // Get current PID before stopping the service
-  const currentRuntime = await readLaunchAgentRuntime(env);
-
   await execLaunchctl(["bootout", domain, plistPath]);
   await execLaunchctl(["unload", plistPath]);
   // Wait for the old process to exit before starting a new one.
   // launchctl bootout/unload return immediately without waiting for process exit,
   // which can cause race conditions where the new process attempts to bind port 18789
   // before the old process has released it.
-  await waitForPidExit(currentRuntime.pid);
+  const exited = await waitForPidExit(currentRuntime.pid);
+  if (!exited && currentRuntime.pid) {
+    stdout.write(
+      `Warning: timed out waiting for old gateway process (PID ${currentRuntime.pid}) to exit. Proceeding with install anyway.\n`,
+    );
+  }
   // launchd can persist "disabled" state even after bootout + plist removal; clear it before bootstrap.
   await execLaunchctl(["enable", `${domain}/${label}`]);
   const boot = await execLaunchctl(["bootstrap", domain, plistPath]);
