@@ -5,6 +5,7 @@ import {
   formatBillingErrorMessage,
   formatAssistantErrorText,
   formatRawAssistantErrorForUi,
+  isToolUseIdMismatchError,
 } from "./pi-embedded-helpers.js";
 import { makeAssistantMessageFixture } from "./test-helpers/assistant-message-fixtures.js";
 
@@ -151,5 +152,34 @@ describe("formatRawAssistantErrorForUi", () => {
     expect(formatRawAssistantErrorForUi(htmlError)).toBe(
       "The AI service is temporarily unavailable (HTTP 521). Please try again in a moment.",
     );
+  });
+
+  it("handles tool_use_id 'does not match' error", () => {
+    const msg = {
+      stopReason: "error",
+      errorMessage:
+        "tool_use_id 'toolu_abc123' does not match any tool_use block in the conversation",
+    } as AssistantMessage;
+    const result = formatAssistantErrorText(msg);
+    expect(result).toContain("Conversation history corruption detected");
+    expect(result).toContain("/new");
+  });
+
+  it("handles tool_result mismatch error", () => {
+    const msg = {
+      stopReason: "error",
+      errorMessage:
+        "unexpected tool_result found: toolu_xyz does not have a corresponding tool_use block",
+    } as AssistantMessage;
+    const result = formatAssistantErrorText(msg);
+    expect(result).toContain("Conversation history corruption detected");
+  });
+
+  it("detects tool_use_id mismatch errors", () => {
+    expect(
+      isToolUseIdMismatchError("tool_use_id 'toolu_abc123' does not match any tool_use block"),
+    ).toBe(true);
+    expect(isToolUseIdMismatchError("unexpected tool_result block found")).toBe(true);
+    expect(isToolUseIdMismatchError("normal error message")).toBe(false);
   });
 });

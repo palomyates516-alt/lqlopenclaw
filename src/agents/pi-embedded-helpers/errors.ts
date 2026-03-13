@@ -185,6 +185,14 @@ export function isCompactionFailureError(errorMessage?: string): boolean {
   return lower.includes("context overflow");
 }
 
+export function isToolUseIdMismatchError(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return (
+    lower.includes("tool_use_id") &&
+    (lower.includes("does not match") || lower.includes("mismatch"))
+  );
+}
+
 const ERROR_PAYLOAD_PREFIX_RE =
   /^(?:error|api\s*error|apierror|openai\s*error|anthropic\s*error|gateway\s*error)[:\s-]+/i;
 const FINAL_TAG_RE = /<\s*\/?\s*final\s*>/gi;
@@ -687,6 +695,11 @@ export function formatAssistantErrorText(
     );
   }
 
+  // Catch tool_use/tool_result mismatch errors (transcript corruption)
+  if (/tool_use_id|tool_result.*corresponding.*tool_use|unexpected.*tool.*block/i.test(raw)) {
+    return "Conversation history corruption detected. Use /new to start a fresh session.";
+  }
+
   if (isMissingToolCallInputError(raw)) {
     return (
       "Session history looks corrupted (tool call input missing). " +
@@ -743,6 +756,11 @@ export function sanitizeUserFacingText(text: string, opts?: { errorContext?: boo
         "Message ordering conflict - please try again. " +
         "If this persists, use /new to start a fresh session."
       );
+    }
+
+    // Catch tool_use/tool_result mismatch errors (transcript corruption)
+    if (/tool_use_id|tool_result.*corresponding.*tool_use|unexpected.*tool.*block/i.test(trimmed)) {
+      return "Conversation history corruption detected. Use /new to start a fresh session.";
     }
 
     if (shouldRewriteContextOverflowText(trimmed)) {
