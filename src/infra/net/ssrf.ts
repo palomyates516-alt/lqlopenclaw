@@ -349,7 +349,15 @@ function withPinnedLookup(
   lookup: PinnedHostname["lookup"],
   connect?: Record<string, unknown>,
 ): Record<string, unknown> {
-  return connect ? { ...connect, lookup } : { lookup };
+  // Default to Happy Eyeballs (RFC 8305) for IPv6/IPv4 dual-stack compatibility.
+  // When IPv6 connection fails within the attempt timeout, IPv4 is tried in parallel.
+  // This fixes media download failures in networks with broken IPv6 connectivity.
+  const defaultConnect: Record<string, unknown> = {
+    autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: 300,
+  };
+  const mergedConnect = connect ? { ...defaultConnect, ...connect } : defaultConnect;
+  return { ...mergedConnect, lookup };
 }
 
 export function createPinnedDispatcher(

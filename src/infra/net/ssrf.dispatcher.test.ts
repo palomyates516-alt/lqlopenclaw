@@ -24,7 +24,7 @@ vi.mock("undici", () => ({
 import { createPinnedDispatcher, type PinnedHostname } from "./ssrf.js";
 
 describe("createPinnedDispatcher", () => {
-  it("uses pinned lookup without overriding global family policy", () => {
+  it("enables Happy Eyeballs by default for IPv6/IPv4 dual-stack compatibility", () => {
     const lookup = vi.fn() as unknown as PinnedHostname["lookup"];
     const pinned: PinnedHostname = {
       hostname: "api.telegram.org",
@@ -37,13 +37,11 @@ describe("createPinnedDispatcher", () => {
     expect(dispatcher).toBeDefined();
     expect(agentCtor).toHaveBeenCalledWith({
       connect: {
+        autoSelectFamily: true,
+        autoSelectFamilyAttemptTimeout: 300,
         lookup,
       },
     });
-    const firstCallArg = agentCtor.mock.calls[0]?.[0] as
-      | { connect?: Record<string, unknown> }
-      | undefined;
-    expect(firstCallArg?.connect?.autoSelectFamily).toBeUndefined();
   });
 
   it("preserves caller transport hints while overriding lookup", () => {
@@ -58,16 +56,39 @@ describe("createPinnedDispatcher", () => {
     createPinnedDispatcher(pinned, {
       mode: "direct",
       connect: {
-        autoSelectFamily: true,
-        autoSelectFamilyAttemptTimeout: 300,
+        autoSelectFamilyAttemptTimeout: 500, // Caller can override defaults
         lookup: previousLookup,
       },
     });
 
     expect(agentCtor).toHaveBeenCalledWith({
       connect: {
-        autoSelectFamily: true,
-        autoSelectFamilyAttemptTimeout: 300,
+        autoSelectFamily: true, // Default preserved when not overridden
+        autoSelectFamilyAttemptTimeout: 500, // Caller's value wins
+        lookup,
+      },
+    });
+  });
+
+  it("allows caller to explicitly disable autoSelectFamily", () => {
+    const lookup = vi.fn() as unknown as PinnedHostname["lookup"];
+    const pinned: PinnedHostname = {
+      hostname: "api.telegram.org",
+      addresses: ["149.154.167.220"],
+      lookup,
+    };
+
+    createPinnedDispatcher(pinned, {
+      mode: "direct",
+      connect: {
+        autoSelectFamily: false, // Explicitly disable
+      },
+    });
+
+    expect(agentCtor).toHaveBeenCalledWith({
+      connect: {
+        autoSelectFamily: false, // Caller's explicit value wins
+        autoSelectFamilyAttemptTimeout: 300, // Default preserved
         lookup,
       },
     });
